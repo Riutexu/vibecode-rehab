@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /
+Disallow: /admin/
+Disallow: /api/
+
+# No bloquear a la IA: los bots de buscadores y agentes LLM
+# (GPTBot, ClaudeBot, Google-Extended, PerplexityBot...) deben leer el sitio.
+
+Sitemap: https://dominio.com/sitemap.xml

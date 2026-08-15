@@ -1,0 +1,19 @@
+# Nombre del Sitio
+
+Sitio web de [rubro] que ofrece [servicios/productos clave], dirigido a [audiencia principal].
+Nuestra propuesta: [diferenciador en 1 frase]. Misión: [misión en 1 frase].
+
+## Secciones
+
+- [Inicio](https://dominio.com/)
+- [Servicios](https://dominio.com/servicios)
+- [Precios](https://dominio.com/precios)
+- [Blog](https://dominio.com/blog)
+- [Contacto](https://dominio.com/contacto)
+
+## Puntos clave
+
+- Precios desde [X] por [periodo/servicio].
+- Horario de atención: [días, horas] ([zona horaria]).
+- Cobertura/mercado: [países/ciudades].
+- Garantía o política destacada: [1 línea].

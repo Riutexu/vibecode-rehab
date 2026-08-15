@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    paths: ['scripts/**', '.github/workflows/**']
+  pull_request:
+
+jobs:
+  audit-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Syntax check
+        run: node --check scripts/audit.mjs
+
+      - name: Smoke audit — example.com (markdown)
+        run: node scripts/audit.mjs https://example.com
+
+      - name: Smoke audit — example.com (JSON, valida las 20 señales)
+        run: |
+          node scripts/audit.mjs https://example.com --json > report.json
+          node -e "
+            const r = require('./report.json');
+            if (!r.findings || r.findings.length !== 20) {
+              console.error('Señales esperadas: 20, obtenidas: ' + (r.findings || []).length);
+              process.exit(1);
+            }
+            console.log('OK: ' + r.findings.length + ' señales · fail=' +
+              r.findings.filter(f => f.status === 'fail').length +
+              ' · warn=' + r.findings.filter(f => f.status === 'warn').length);
+          "
+
+      - name: Smoke audit — SPA real con Vite (vite.dev)
+        run: node scripts/audit.mjs https://vite.dev --json > /dev/null

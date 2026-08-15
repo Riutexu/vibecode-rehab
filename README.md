@@ -1,10 +1,16 @@
+<p align="center">
+  <a href="https://skillicons.dev">
+    <img src="https://skillicons.dev/icons?i=react,vite,vercel,astro,nextjs,nodejs,bash,powershell,githubactions,md,html,css&perline=6&theme=light" alt="Stack: React, Vite, Vercel, Astro, Next.js, Node.js, Bash, PowerShell, GitHub Actions, Markdown, HTML, CSS" />
+  </a>
+</p>
+
 # 🏥 VIBECODE REHAB
 
-> "20 señales de que un sitio fue vibecodeado" — convertidas en un prompt de auditoría que cualquier agente de IA puede ejecutar.
+> Las 20 señales de que un sitio fue vibecodeado — convertidas en una **skill para agentes de IA** + un **auditor ejecutable** + **plantillas de corrección**.
 
-Pégalo junto con la URL del sitio y un agente (opencode, Claude, Gemini, ChatGPT, Cursor…) auditará y corregirá **los 20 problemas típicos del vibecoding** de forma autónoma, con detección → corrección → verificación por cada ítem, y un reporte final.
+Pega la URL de cualquier sitio en esta skill (opencode, Claude Code, Gemini, ChatGPT, Cursor…) y el agente auditará y corregirá **las 20 señales típicas del vibecoding** de forma autónoma: detectar → corregir → verificar, con un reporte final que clasifica cada hallazgo por confianza.
 
-## 🚩 Las 20 señales que detecta y corrige
+## 🚩 Las 20 señales
 
 | # | Señal | # | Señal |
 |---|-------|---|-------|
@@ -17,36 +23,70 @@ Pégalo junto con la URL del sitio y un agente (opencode, Claude, Gemini, ChatGP
 | 7 | Sin Open Graph / OG image | 17 | Sourcemaps expuestos |
 | 8 | Datos no estructurados (sin JSON-LD) | 18 | Errores en consola |
 | 9 | Varios `<h1>` o ninguno | 19 | Bundle JS gigante |
-| 10 | Sin tag canónico | 20 | Imágenes sin optimizar ni lazy |
+| 10 | Sin tag canónico | 20 | Imágenes sin optimizar ni lazy loading |
 
-## 📦 Archivos
+## 📦 Qué contiene
 
 | Archivo | Qué es |
 |---------|--------|
-| `AUDIT-PROMPT.md` | ⭐ El prompt completo listo para pegar en cualquier agente de IA |
-| `README.md` | Este archivo |
+| `SKILL.md` | ⭐ La skill completa: instrucciones para cualquier agente IA (las 20 señales + verificación + reporte) |
+| `scripts/audit.mjs` | Auditor automático de las 20 señales. Node 18+, **cero dependencias**, reporte markdown o `--json` |
+| `templates/` | Plantillas base: `robots.txt`, `llms.txt`, `vercel.json`, `vite.config.ts`, `sitemap-gen.mjs` |
+| `AGENTS.md` | Instrucciones para agentes que escaneen el repo |
+| `.github/workflows/ci.yml` | Smoke tests del auditor (CI) |
 
 ## 🚀 Cómo usarlo
 
-1. Abre [`AUDIT-PROMPT.md`](AUDIT-PROMPT.md).
-2. Copia todo lo que está entre `--- INICIO DEL PROMPT ---` y `--- FIN DEL PROMPT ---`.
-3. Pégalo en tu agente de IA, reemplaza `{{PEGA_AQUI_LA_URL}}` por la URL del sitio, y **dale acceso al código** si lo tienes local (en opencode/Cursor puedes poner el prompt en un archivo `AGENTS.md` del proyecto).
-4. Revisa el reporte final y aplica las "acciones manuales" que indique (dominio propio, etc.).
+### Opción A — Pégale la skill al agente (cualquier IA)
 
-### Consejos por herramienta
+1. Abre [`SKILL.md`](SKILL.md) y copia su contenido.
+2. Pégalo en tu agente junto con la URL del sitio.
+3. Si tienes Node: ejecuta antes el auditor para un diagnóstico rápido:
+   ```bash
+   node scripts/audit.mjs https://tu-sitio.vercel.app
+   ```
 
-- **opencode / Cursor / Copilot:** copia `AUDIT-PROMPT.md` al repo del proyecto y ábrelo con la URL; el agente tendrá acceso directo al código y podrá editar los archivos.
-- **Claude Projects:** crea un proyecto, sube el prompt como instrucción y suelta la URL en el chat.
-- **Gemini / ChatGPT:** pega el prompt + URL en una conversación nueva; si solo tienes la URL desplegada, el agente te devolverá los archivos listos para aplicar.
+### Opción B — Instálala como skill
 
-## 🧹 Qué esperar del resultado
+```bash
+# opencode
+mkdir -p ~/.config/opencode/skills/vibecode-rehab && cp SKILL.md ~/.config/opencode/skills/vibecode-rehab/
 
-El agente te devolverá un reporte con el estado de cada señal (`✅ / ⚠️ / ❌`), los cambios aplicados y una verificación integral (Lighthouse ≥ 90 en Performance/SEO/Accessibility/Best Practices, HTTP codes, consola limpia). Los ítems que requieren acción humana (comprar dominio, confirmar una migración de framework) quedan listados al final del reporte.
+# Claude Code
+mkdir -p ~/.claude/skills/vibecode-rehab && cp SKILL.md ~/.claude/skills/vibecode-rehab/
+
+# Grok / agentes que usan .grok/skills
+mkdir -p .grok/skills/vibecode-rehab && cp SKILL.md .grok/skills/vibecode-rehab/
+```
+
+### Opción C — Solo diagnóstico de un vistazo
+
+```bash
+node scripts/audit.mjs https://sitio.vercel.app            # reporte markdown
+node scripts/audit.mjs https://sitio.vercel.app --json     # para consumo programático
+node scripts/audit.mjs https://sitio.vercel.app https://sitio.vercel.app/precios  # varias páginas
+```
+
+Si el sitio tiene `sitemap.xml`, el auditor auto-analiza hasta 3 páginas extra (títulos, h1, metas…). En SPAs que curl no puede renderizar, la skill instruye al agente a usar **Firecrawl** (`npx -y firecrawl-cli@latest init`) para crawlear con JavaScript real.
+
+## 🧹 Qué esperar del reporte
+
+19 de 20 señales se verifican con HTTP real; la nº 18 (consola) queda como acción manual con instrucción exacta. Cada hallazgo lleva **confianza**: `confirmed` / `probable` / `informational` / `likely_false_positive` — el agente no inventa resultados. Cierre de la skill: Lighthouse (≥ 90 Performance/SEO/Accessibility/Best Practices), Rich Results, Sharing Debugger y accesos `robots.txt`/`sitemap.xml`/`llms.txt`.
+
+## 🙏 Built with
+
+- [**watermarks-remover**](https://github.com/guillaumemeyer/watermarks-remover) — formato de *agent skill* (SKILL.md con frontmatter), clasificación de hallazgos por confianza y estructura de tests/CI de la que este repo aprende.
+- [**Firecrawl**](https://github.com/firecrawl) — crawling real con JavaScript para la fase de detección (skill/MCP `firecrawl-cli`, endpoints `map`/`scrape`), respetando robots.txt.
+- [**skill-icons**](https://github.com/tandpfun/skill-icons) — los iconos de stack de este README (skillicons.dev).
 
 ## 🤝 Contribuciones
 
-¿Se te ocurre otra señal clásica del vibecoding (CTA desubicados, footer de 400 líneas, todo en un `App.jsx` de 3000 líneas…)? Abre un issue o un PR en el repo con el formato: señal → detección → corrección → verificación.
+¿Otra señal clásica del vibecoding (todo en un `App.jsx` de 3000 líneas, footer de 400 líneas, CTA repetidos…)? Abre un issue o PR con el formato: señal → detección → corrección → verificación. Los cambios a `audit.mjs` deben pasar los smoke tests del CI.
+
+## ⚖️ Uso responsable
+
+Audita y corrige solo sitios propios o con autorización. La skill respeta robots.txt y las políticas de scraping.
 
 ---
 
-*Creado porque la IA generó el problema… y la IA también puede arreglarlo. 😌*
+*Creado porque la IA generó el problema… y la IA también puede arreglarlo.*
