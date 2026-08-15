@@ -1,9 +1,12 @@
+# Una sola regla "User-agent: *" es suficiente: ese grupo aplica a TODOS los bots,
+# incluidos los de IA (GPTBot, ClaudeBot, Google-Extended, PerplexityBot...).
+# NO crees grupos separados para bots de IA con Disallow: los bloquearías (señal 12).
+# Bloquea únicamente lo que no debe indexarse ni leerse.
+
 User-agent: *
 Allow: /
 Disallow: /admin/
 Disallow: /api/
-
-# No bloquear a la IA: los bots de buscadores y agentes LLM
-# (GPTBot, ClaudeBot, Google-Extended, PerplexityBot...) deben leer el sitio.
+# Si tienes vistas internas: Disallow: /cesta/  (ejemplos: checkout, dashboard, búsqueda)
 
 Sitemap: https://dominio.com/sitemap.xml

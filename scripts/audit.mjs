@@ -1,27 +1,43 @@
 #!/usr/bin/env node
 /**
  * VIBECODE REHAB — Auditor de las 20 señales de un sitio vibecodeado.
- * Cero dependencias, Node 18+ (usa fetch global).
+ * Cero dependencias, Node 18+ (usa fetch global). Funciona igual en Windows, macOS y Linux.
  *
  * Uso:
- *   node audit.mjs https://sitio.vercel.app              # reporte markdown
- *   node audit.mjs https://sitio.vercel.app --json       # reporte JSON
- *   node audit.mjs https://sitio.vercel.app https://sitio.vercel.app/precios   # varias páginas
+ *   node audit.mjs https://sitio.vercel.app                      → reporte markdown
+ *   node audit.mjs https://sitio.vercel.app --json               → reporte JSON
+ *   node audit.mjs <url> <url2> <url3>                           → varias páginas explícitas
+ *   node audit.mjs <url> --limit 10                              → auto-analiza hasta 10 URLs del sitemap
+ *   node audit.mjs <url> --output informe.md                     → escribe el reporte a archivo
+ *   node audit.mjs <url> --strict                                → sale con código 1 si hay errores
  *
- * Si solo pasas la raíz y existe sitemap.xml, se auto-analizan hasta 3 URLs más.
+ * Si solo pasas la raíz y existe sitemap.xml, se auto-analizan hasta 3 URLs más
+ * (configurable con --limit).
  */
 
 const args = process.argv.slice(2);
 const urls = args.filter((a) => /^https?:\/\//i.test(a));
 const asJson = args.includes('--json');
+const strict = args.includes('--strict');
+const limIdx = args.indexOf('--limit');
+const limit = limIdx !== -1 ? Math.min(10, Math.max(0, parseInt(args[limIdx + 1], 10) || 0)) : 3;
+const outIdx = args.indexOf('--output');
+const outFile = outIdx !== -1 ? args[outIdx + 1] : null;
 
 if (urls.length === 0) {
-  console.error('Uso: node audit.mjs <url> [url2 ...] [--json]');
+  console.error('Uso: node audit.mjs <url> [url2 ...] [--json] [--limit N] [--output archivo] [--strict]');
   process.exit(1);
 }
 
 const BASE = urls[0].replace(/\/+$/, '');
+const ORIGIN = new URL(BASE).origin;
 const UA = 'VibecodeRehabAudit/1.0';
+const CONF_LABEL = {
+  confirmed: 'confirmado',
+  probable: 'probable',
+  informational: 'informativo',
+  likely_false_positive: 'posible falso positivo',
+};
 const AI_BOTS = [
   'gptbot', 'claudebot', 'claude-web', 'anthropic-ai', 'google-extended',
   'perplexitybot', 'ccbot', 'bytespider', 'meta-externalagent', 'cohere-ai',
@@ -35,14 +51,15 @@ function F(id, name, status, confidence, detail, fix) {
   findings.push({ id, name, status, confidence, detail, fix });
 }
 
-async function get(u) {
+async function get(u, { head = false } = {}) {
   try {
     const res = await fetch(u, {
+      method: head ? 'HEAD' : 'GET',
       headers: { 'user-agent': UA, accept: '*/*', 'accept-encoding': 'gzip' },
       redirect: 'follow',
       signal: AbortSignal.timeout(20000),
     });
-    const text = await res.text();
+    const text = head ? '' : await res.text();
     const len = res.headers.get('content-length');
     return {
       status: res.status,
@@ -56,19 +73,8 @@ async function get(u) {
   }
 }
 
-async function head(u) {
-  try {
-    const res = await fetch(u, {
-      method: 'HEAD',
-      headers: { 'user-agent': UA, accept: '*/*', 'accept-encoding': 'gzip' },
-      redirect: 'follow',
-      signal: AbortSignal.timeout(15000),
-    });
-    const len = res.headers.get('content-length');
-    return { status: res.status, size: len ? parseInt(len, 10) : null };
-  } catch (e) {
-    return { status: 0, size: null };
-  }
+function absUrl(u) {
+  try { return new URL(u, BASE).href; } catch { return u; }
 }
 
 function extract(html, re) {
@@ -80,54 +86,71 @@ function parsePage(html) {
   const imgs = (html.match(/<img[\s\S]*?>/gi) || []).map((tag) => {
     const src = extract(tag, /src=["']([^"']+)["']/i) || '';
     const noAlt = !/alt=(["'])/i.test(tag);
+    const deco = /alt=["'](?:["'])/i.test(tag) || tag.includes('alt=""');
     const attr = (n) => new RegExp(`${n}=(["'])([^"']*)\\1`, 'i').test(tag);
-    return { src, noAlt, lazy: attr('loading'), sized: attr('width') && attr('height') };
+    return { src, noAlt: noAlt && !deco, lazy: attr('loading'), sized: attr('width') && attr('height') };
   });
   return {
     title: extract(html, /<title[^>]*>([^<]*)<\/title>/i),
     metaDesc: /<meta[^>]+name=["']description["']/i.test(html),
-    ogImage: /<meta[^>]+property=["']og:image["']/i.test(html),
+    ogImage: (extract(html, /<meta[^>]+property=["']og:image["'][^>]*content=["']([^"']*)["']/i) ||
+      extract(html, /<meta[^>]+content=["']([^"']*)["'][^>]*property=["']og:image["']/i)) || null,
     ogTags: (html.match(/<meta[^>]+property=["']og:(title|description|url|type|site_name)["']/gi) || []).length,
+    twitterCard: /<meta[^>]+name=["']twitter:card["']/i.test(html),
     ldjson: /application\/ld\+json/i.test(html),
     h1: (html.match(/<h1[\s>]/gi) || []).length,
-    canonical: /<link[^>]+rel=["']canonical["']/i.test(html),
+    canonical: extract(html, /<link[^>]+rel=["']canonical["'][^>]*href=["']([^"']+)["']/i) || null,
     lang: /<html[^>]*\blang=["'][a-zA-Z]{2,3}(?:-[a-zA-Z]{2,3})?["']/i.test(html),
     imgs,
     hasContent: /<h[1-6][\s>]|<\/(?:p|article|section|main|li|nav|h[1-6])>/i.test(html),
+    scripts: [...new Set((html.match(/<script[^>]+src=["']([^"']+\.js[^"']*)["']/gi) || [])
+      .map((s) => (extract(s, /src=["']([^"']+\.js[^"']*)["']/i) || '').trim()))],
   };
 }
 
 async function main() {
-  // ---- Páginas a analizar (raíz + opcionales + auto-extension por sitemap) ----
-  const rootPage = await get(BASE);
-  pages.push({ url: BASE, text: rootPage.text, ...parsePage(rootPage.text), status: rootPage.status });
+  // ---- Fase 1: página raíz (paralela con los archivos base del sitio) ----
+  const [rootPage, sitemapR, robotsR, llmsR, favR, notFoundR] = await Promise.all([
+    get(BASE),
+    get(`${BASE}/sitemap.xml`),
+    get(`${BASE}/robots.txt`),
+    get(`${BASE}/llms.txt`),
+    get(`${BASE}/favicon.ico`, { head: true }),
+    get(`${BASE}/__vibecode_rehab_404_check_xyz`),
+  ]);
 
-  if (urls.length === 1 && rootPage.text && /<urlset/i.test(rootPage.text)) {
-    const locs = (rootPage.text.match(/<loc[^>]*>([^<]+)<\/loc>/gi) || [])
+  const html0 = rootPage.text;
+  pages.push({ url: BASE, text: html0, ...parsePage(html0), status: rootPage.status });
+
+  // ---- Fase 2: páginas extra (URLs explícitas + auto-extension por sitemap) ----
+  const extraUrls = [...urls.slice(1)];
+  if (urls.length === 1 && sitemapR.status === 200) {
+    const locs = (sitemapR.text.match(/<loc[^>]*>([^<]+)<\/loc>/gi) || [])
       .map((l) => l.replace(/<\/?loc[^>]*>/gi, '').trim())
-      .filter((l) => l && l !== BASE + '/' && !/\.(png|jpg|jpeg|webp|gif|svg|pdf|ico)$/i.test(l))
-      .slice(0, 3);
-    for (const loc of locs) {
-      const p = await get(loc);
-      pages.push({ url: loc, text: p.text, ...parsePage(p.text), status: p.status });
-    }
-  } else {
-    for (const u of urls.slice(1)) {
-      const p = await get(u);
-      pages.push({ url: u, text: p.text, ...parsePage(p.text), status: p.status });
-    }
+      .filter((l) => l && l !== BASE + '/' && !/\.(png|jpg|jpeg|webp|gif|svg|pdf|ico|xml|txt)$/i.test(l))
+      .slice(0, limit);
+    extraUrls.push(...locs);
   }
+  const extraPages = await Promise.all(
+    [...new Set(extraUrls)].slice(0, 10).map(async (u) => {
+      const p = await get(u);
+      return { url: u, text: p.text, ...parsePage(p.text), status: p.status };
+    })
+  );
+  pages.push(...extraPages);
 
   const errs = pages.filter((p) => p.status === 0);
   const okPages = pages.filter((p) => p.status > 0 && p.status < 400);
-  const html0 = rootPage.text;
 
   // ---------- 1. URL en vercel.app ----------
+  const onVercel = /\.vercel\.app$/i.test(BASE);
   F(1, 'URL en vercel.app',
-    /\.vercel\.app$/i.test(BASE) ? 'fail' : 'ok',
+    onVercel ? 'fail' : 'ok',
     'confirmed',
-    /\.vercel\.app$/i.test(BASE) ? `El dominio "${new URL(BASE).hostname}" es de Vercel.` : `Dominio propio o de otra plataforma: ${new URL(BASE).hostname}.`,
-    'Añade un dominio custom en Vercel (Settings > Domains) y usa URLs canonical con ese dominio.');
+    onVercel
+      ? `El dominio "${new URL(BASE).hostname}" es de Vercel: denota proyecto de pruebas y dificulta SEO y confianza.`
+      : `Dominio propio o ajeno a Vercel: ${new URL(BASE).hostname}.`,
+    'Añade dominio custom en Vercel (Settings → Domains, DNS CNAME a cname.vercel-dns.com), redirige el .vercel.app (301/308) y usa ese dominio en canonical y metadata.');
 
   // ---------- 2. View-source vacío ----------
   const emptyPages = okPages.filter((p) => !p.hasContent || p.text.length < 100);
@@ -135,28 +158,25 @@ async function main() {
     emptyPages.length ? 'fail' : 'ok',
     emptyPages.length ? 'confirmed' : 'confirmed',
     emptyPages.length
-      ? `${emptyPages.length} página(s) sin contenido real en el HTML servido: ${emptyPages.map((p) => p.url).join(', ')}`
+      ? `${emptyPages.length} página(s) sin contenido real en el HTML servido: ${emptyPages.map((p) => p.url).join(', ')} (los buscadores y agentes IA ven una página en blanco).`
       : `HTML servido con contenido real en ${okPages.length} página(s).`,
-    'Prerender con vite-plugin-prerender / react-snap, o migra a un framework SSR/SSG (pregunta antes de migrar).');
+    'Prerender con vite-plugin-prerender o react-snap, o migra a SSR/SSG (pregunta antes de migrar).',);
 
   // ---------- 3. Página 404 ----------
-  const missing = await get(`${BASE}/__vibecode_rehab_404_check_xyz`);
   F(3, 'Página de 404',
-    missing.status === 404 ? 'ok' : missing.status === 200 ? 'fail' : 'warn',
-    missing.status === 200 ? 'confirmed' : 'probable',
-    missing.status === 0
-      ? `No se pudo comprobar (${missing.error}): revisa manualmente una ruta inexistente.`
-      : missing.status === 404
-        ? `HTTP ${missing.status} en ruta inexistente.`
-        : `HTTP ${missing.status} en ruta inexistente (se espera el contenido del 404 o una redirección).`,
-    'Crea una página 404 (ruta "*" en React Router) y devuelve HTTP 404 real (ver vercel.json del template).');
+    notFoundR.status === 404 ? 'ok' : notFoundR.status === 200 ? 'fail' : 'warn',
+    notFoundR.status === 200 ? 'confirmed' : 'probable',
+    notFoundR.status === 0
+      ? `No se pudo comprobar (${notFoundR.error}): revisa manualmente una ruta inexistente.`
+      : notFoundR.status === 404
+        ? `HTTP 404 correcto en ruta inexistente.`
+        : `HTTP ${notFoundR.status} en ruta inexistente (se espera el contenido del 404 o una redirección).`,
+    'Crea una página 404 (ruta "*" en React Router, ver templates/NotFound.tsx) y devuelve HTTP 404 real (templates/vercel.json).');
 
   // ---------- 4. Framework (informativo) ----------
-  const stack =
-    /<script[^>]+src=["'][^"']*\/assets\//i.test(html0) || /vite[\s\S]*?(client|plugin)/i.test(html0) ? 'Vite' : '';
   const detected = [
-    stack && stack,
-    /react/i.test(html0) && 'React',
+    /<script[^>]+src=["'][^"']*\/assets\//i.test(html0) || /vite[\s\S]*?(client|plugin)/i.test(html0) ? 'Vite' : '',
+    /react/i.test(html0) ? (pages.length > 1 ? '' : '') || 'React' : '',
     /__next|next\/|_next\//i.test(html0) && 'Next.js',
     /nuxt/i.test(html0) && 'Nuxt',
     /svelte/i.test(html0) && 'Svelte',
@@ -165,8 +185,10 @@ async function main() {
   ].filter(Boolean);
   F(4, 'Vite + React para todo (evaluar arquitectura)',
     'warn', 'informational',
-    detected.length ? `Stack detectado: ${detected.join(' + ')}.` : 'Stack no identificable desde el HTML (informativo).',
-    'Reserva React solo para lo interactivo; prerender para lo informativo. Decide con el dueño si migra.');
+    detected.length
+      ? `Stack detectado: ${detected.join(' + ')}. Informativo: evalúa si todo el contenido necesita JavaScript.`
+      : 'Stack no identificable desde el HTML (informativo).',
+    'Reserva React solo para lo interactivo; prerender para lo informativo. Si el sitio es puramente informativo, plantea la migración antes de tocar código.');
 
   // ---------- 5. Mismo título / sin título ----------
   const noTitle = okPages.filter((p) => !p.title);
@@ -177,9 +199,9 @@ async function main() {
     noTitle.length
       ? `Página(s) sin <title>: ${noTitle.map((p) => p.url).join(', ')}`
       : titles.length === 1
-        ? `Con ${okPages.length} página(s) analizada(s) solo hay un título: "${titles[0]}" ${okPages.length > 1 ? '(sospechoso de repetición)' : '(no se puede comparar con una sola página)'}.`
-        : `Títulos únicos en las ${okPages.length} páginas analizadas.`,
-    'Título único por página (50-60 chars) con react-helmet-async o prerender.',);
+        ? `Con ${okPages.length} página(s) analizada(s) solo hay un título — "${titles[0]}" — ${okPages.length > 1 ? '(repetido en todas: sospechoso)' : '(no se puede comparar con una sola página)'}.`
+        : `Títulos únicos en las ${okPages.length} página(s) analizada(s).`,
+    'Título único por página (50-60 chars, fórmula "Nombre de página | Marca") con templates/Seo.tsx (react-helmet-async) o prerender.');
 
   // ---------- 6. Meta description ----------
   const noDesc = okPages.filter((p) => !p.metaDesc);
@@ -189,7 +211,7 @@ async function main() {
     noDesc.length
       ? `Sin description en: ${noDesc.map((p) => p.url).join(', ')}`
       : 'Description presente en todas las páginas analizadas.',
-    'Meta description única por página (150-160 chars).');
+    'Description única por página (150-160 chars, propuesta de valor + llamada a la acción). Ver templates/Seo.tsx.');
 
   // ---------- 7. Open Graph ----------
   const noOg = okPages.filter((p) => !p.ogImage);
@@ -199,7 +221,24 @@ async function main() {
     noOg.length
       ? `Sin og:image en: ${noOg.map((p) => p.url).join(', ')}`
       : 'og:image presente en todas las páginas analizadas.',
-    'og:title/description/image (1200x630, URL absoluta) + twitter:card=summary_large_image.');
+    'og:title/description/image (1200x630, URL absoluta y que devuelva 200) + og:image:width/height, og:url, og:type, og:site_name y twitter:card=summary_large_image. Ver templates/Seo.tsx.');
+
+  // tareas asíncronas de verificación de assets (og:image, sitemap, bundle, sourcemaps)
+  const ogImg = okPages.map((p) => p.ogImage).find(Boolean);
+  const ogStatus = ogImg ? await get(absUrl(ogImg), { head: true }) : null;
+  if (noOg.length === 0 && ogImg) {
+    const ogAfter = findings.find((f) => f.id === 7);
+    if (ogStatus && ogStatus.status !== 200 && ogStatus.status !== 0) {
+      ogAfter.status = 'warn';
+      ogAfter.confidence = 'confirmed';
+      ogAfter.detail += ` La imagen referenciada devuelve HTTP ${ogStatus.status}.`;
+    } else if (ogStatus && ogStatus.status === 0) {
+      ogAfter.detail += ` No se pudo verificar la imagen (${ogStatus.error}).`;
+    }
+    const noTw = okPages.filter((p) => !p.twitterCard);
+    if (noTw.length) ogAfter.detail += ` Sin twitter:card en ${noTw.length} página(s).`;
+    if (ogAfter.status === 'ok' && noTw.length) { ogAfter.status = 'warn'; ogAfter.confidence = 'probable'; }
+  }
 
   // ---------- 8. Datos estructurados ----------
   const noLd = okPages.filter((p) => !p.ldjson);
@@ -209,7 +248,7 @@ async function main() {
     noLd.length
       ? `Sin application/ld+json en: ${noLd.map((p) => p.url).join(', ')}`
       : 'JSON-LD presente.',
-    'Añade WebSite + Organization (globales) y Article/BreadcrumbList/FAQPage por página. Valida en schema.org/validator.');
+    'WebSite + Organization (globales); Article, BreadcrumbList, FAQPage, Product/Service por página. Valida en validator.schema.org. Ver templates/Seo.tsx.');
 
   // ---------- 9. H1 ----------
   const badH1 = okPages.filter((p) => p.h1 !== 1);
@@ -217,9 +256,9 @@ async function main() {
     badH1.length ? 'fail' : 'ok',
     badH1.length ? 'confirmed' : 'confirmed',
     badH1.length
-      ? badH1.map((p) => `${p.url} → ${p.h1} h1`).join('; ')
+      ? badH1.map((p) => `${p.h1} <h1> en ${p.url}`).join(' · ')
       : 'Una sola <h1> por página.',
-    'Exactamente un <h1> por página y jerarquía h1>h2>h3 sin saltos.');
+    'Exactamente un <h1> por página y jerarquía h1 > h2 > h3 sin saltos (el tamaño visual se controla con clases, no con más h1).');
 
   // ---------- 10. Canonical ----------
   const noCanon = okPages.filter((p) => !p.canonical);
@@ -228,63 +267,78 @@ async function main() {
     noCanon.length ? 'confirmed' : 'confirmed',
     noCanon.length
       ? `Sin canonical en: ${noCanon.map((p) => p.url).join(', ')}`
-      : 'Canonical presente.',
-    '<link rel="canonical"> con la URL absoluta canónica por página.');
+      : 'Canonical presente en todas las páginas analizadas.',
+    '<link rel="canonical"> con la URL absoluta canónica por página, coherente con la convención de www y slash final de todo el sitio. Ver templates/Seo.tsx.');
 
   // ---------- 11. llms.txt ----------
-  const llms = await get(`${BASE}/llms.txt`);
   F(11, 'llms.txt',
-    llms.status === 200 && llms.text.trim().length > 50 ? 'ok' : 'fail',
-    'confirmed',
-    llms.status === 200 ? `Presente (${llms.text.trim().length} chars).` : `HTTP ${llms.status || llms.error} en /llms.txt.`,
-    'Crea llms.txt en la raíz (ver templates/llms.txt; estándar llmstxt.org).');
+    llmsR.status === 200 && llmsR.text.trim().length > 50 ? 'ok' : 'fail',
+    llmsR.status === 200 ? 'confirmed' : 'confirmed',
+    llmsR.status === 200
+      ? `Presente (${llmsR.text.trim().length} caracteres).`
+      : `HTTP ${llmsR.status || llmsR.error} en /llms.txt (los agentes IA no tienen índice oficial del sitio).`,
+    'Crea llms.txt en la raíz (templates/llms.txt, estándar llmstxt.org): resumen honesto, secciones y puntos clave.');
 
   // ---------- 12. robots.txt ----------
-  const robots = await get(`${BASE}/robots.txt`);
-  let robotsInfo = '';
-  let robotsOk = true;
-  if (robots.status !== 200) {
-    robotsOk = false;
-    robotsInfo = `HTTP ${robots.status || robots.error} en /robots.txt.`;
+  let robotsInfo = '', robotsStatus = 'ok';
+  if (robotsR.status !== 200) {
+    robotsStatus = 'fail';
+    robotsInfo = `HTTP ${robotsR.status || robotsR.error} en /robots.txt.`;
   } else {
-    const body = robots.text;
+    const body = robotsR.text;
     const blockedBots = AI_BOTS.filter((b) => {
-      const m = body.match(new RegExp(`user-agent:\\s*([^\\n]*?${b}[^\\n]*)`, 'ig'));
-      if (!m) return false;
-      const seg = body.slice(body.toLowerCase().indexOf(m[0].toLowerCase()), body.length).split(/\n\s*\n|user-agent:/i)[0] || '';
+      const idx = body.toLowerCase().indexOf(new RegExp(`user-agent:\\s*([^\\n]*?${b})`, 'i').exec(body.toLowerCase()) ? body.toLowerCase().search(new RegExp(`user-agent:\\s*[^\\n]*${b}`, 'i')) : -1);
+      if (idx === -1) return false;
+      const seg = body.slice(idx).split(/\n\s*\n|(?=\n\s*user-agent:)/i)[0] || '';
       return /disallow:\s*(\/)/i.test(seg);
     });
-    if (!body.match(/user-agent:/i)) { robotsOk = false; robotsInfo = 'robots.txt existe pero no tiene reglas User-agent.'; }
-    else if (blockedBots.length) { robotsOk = false; robotsInfo = `IA bloqueada: ${blockedBots.join(', ')}.`; }
-    else {
+    const globalBlock = /user-agent:\s*\*[\s\S]*?disallow:\s*\/\s/i.test(body);
+    if (globalBlock) {
+      robotsStatus = 'fail';
+      robotsInfo = 'Disallow: / para el agente comodín: bloquea buscadores e IA.';
+    } else if (blockedBots.length) {
+      robotsStatus = 'fail';
+      robotsInfo = `IA bloqueada: ${blockedBots.join(', ')}.`;
+    } else if (!body.match(/user-agent:/i)) {
+      robotsStatus = 'fail';
+      robotsInfo = 'robots.txt existe pero no tiene reglas User-agent.';
+    } else {
       robotsInfo = 'robots.txt no bloquea buscadores ni IA.';
-      if (!/sitemap:/i.test(body)) robotsInfo += ' No referencia sitemap (ver señal 14).';
+      if (!/sitemap:/i.test(body)) robotsInfo += ' No referencia el sitemap (señal 14).';
     }
   }
-  F(12, 'robots.txt bloqueando IA',
-    robotsOk ? 'ok' : 'fail',
-    robots.status === 200 ? 'confirmed' : 'confirmed',
+  F(12, 'robots.txt bloqueando la IA',
+    robotsStatus, robotsR.status === 200 ? 'confirmed' : 'confirmed',
     robotsInfo,
-    'Permite GPTBot/ClaudeBot/Google-Extended/PerplexityBot y añade Sitemap (ver templates/robots.txt).');
+    'Bloquea solo lo privado (/admin/, /api/); permite buscadores e IA; añade Sitemap. Template seguro: templates/robots.txt.');
 
   // ---------- 13. Favicon ----------
-  const fav = await head(`${BASE}/favicon.ico`);
   const iconLink = /rel=["'](?:shortcut )?icon["']/i.test(html0);
-  const favOk = fav.status !== 404 && fav.status !== 0 || iconLink;
+  const appleTouch = /rel=["']apple-touch-icon["']/i.test(html0);
+  const favOk = (favR.status !== 404 && favR.status !== 0) || iconLink;
   F(13, 'Favicon',
     favOk ? 'ok' : 'fail',
     favOk ? 'confirmed' : 'confirmed',
-    `${iconLink ? 'link rel=icon presente' : 'sin link rel=icon'} · /favicon.ico → ${fav.status ? `HTTP ${fav.status}` : fav.error || 'n/a'}.`,
-    'Crea favicon.ico/SVG + apple-touch-icon (180x180) en /public.');
+    `${iconLink ? 'link rel=icon presente' : 'sin link rel="icon"'} · /favicon.ico → ${favR.status ? `HTTP ${favR.status}` : favR.error || 'n/a'}${appleTouch ? ' · apple-touch-icon presente' : ' · falta apple-touch-icon (iOS)'}.`,
+    'Crea public/favicon.ico (32x32), favicon.svg y apple-touch-icon.png (180x180), y decláralos con <link rel="icon"> en el head.');
 
   // ---------- 14. Sitemap ----------
-  const sitemap = await get(`${BASE}/sitemap.xml`);
-  const sitemapOk = sitemap.status === 200 && /<loc>/i.test(sitemap.text);
+  const sitemapOk = sitemapR.status === 200 && /<loc>/i.test(sitemapR.text);
+  let sitemapDetail = '';
+  if (sitemapOk) {
+    const locs = (sitemapR.text.match(/<loc[^>]*>([^<]+)<\/loc>/gi) || [])
+      .map((l) => l.replace(/<\/?loc[^>]*>/gi, '').trim()).slice(0, 3);
+    const statuses = await Promise.all(locs.map((l) => get(absUrl(l), { head: true })));
+    const rotas = statuses.map((s, i) => `${s.status === 200 ? '200' : s.status || s.error}: ${locs[i].slice(0, 70)}`);
+    sitemapDetail = `Presente con ${(sitemapR.text.match(/<loc>/g) || []).length} URL(s). Muestra: ${rotas.join(' | ')}`;
+  } else {
+    sitemapDetail = `HTTP ${sitemapR.status || sitemapR.error} en /sitemap.xml.`;
+  }
   F(14, 'sitemap.xml',
     sitemapOk ? 'ok' : 'fail',
     sitemapOk ? 'confirmed' : 'confirmed',
-    sitemapOk ? `Presente con ${(sitemap.text.match(/<loc>/g) || []).length} URL(s).` : `HTTP ${sitemap.status || sitemap.error} en /sitemap.xml.`,
-    'Genera sitemap.xml desde las rutas reales (ver templates/sitemap-gen.mjs) y referéncialo en robots.txt.');
+    sitemapDetail,
+    'Genera sitemap.xml desde las rutas reales (templates/sitemap-gen.mjs o el mapa de URLs de Firecrawl) y referéncialo en robots.txt.');
 
   // ---------- 15. Atributo de idioma ----------
   const noLang = okPages.filter((p) => !p.lang);
@@ -293,79 +347,81 @@ async function main() {
     noLang.length ? 'confirmed' : 'confirmed',
     noLang.length
       ? `Sin lang en: ${noLang.map((p) => p.url).join(', ')}`
-      : 'lang presente.',
-    '<html lang="es"> (o el idioma real); hreflang si es multi-idioma.');
+      : 'lang presente en todas las páginas analizadas.',
+    '<html lang="es"> (o el idioma real); añade hreflang si el sitio es multi-idioma.');
 
   // ---------- 16. Alt en imágenes ----------
   const allImgs = okPages.flatMap((p) => p.imgs.map((i) => ({ ...i, page: p.url })));
   const noAltImgs = allImgs.filter((i) => i.src && i.noAlt);
-  const unsized = allImgs.filter((i) => i.src && !i.lazy || i.src && !i.sized);
+  const unsized = allImgs.filter((i) => i.src && (!i.lazy || !i.sized));
   F(16, 'Texto alternativo (alt)',
     noAltImgs.length ? 'fail' : allImgs.length ? 'ok' : 'warn',
     noAltImgs.length ? 'confirmed' : 'probable',
     noAltImgs.length
-      ? `${noAltImgs.length} img sin alt (ej. ${noAltImgs[0].page})${unsized.length ? `; ${unsized.length} sin loading/dimensiones` : ''}.`
+      ? `${noAltImgs.length} de ${allImgs.length} img sin alt (ej. ${noAltImgs[0].page})${unsized.length ? `; ${unsized.length} sin loading="lazy" o width/height` : ''}.`
       : allImgs.length
-        ? `${allImgs.length} img con alt en las páginas analizadas${unsized.length ? `; ${unsized.length} sin loading/lazy o width/height` : '.'}`
-        : 'No se detectaron imágenes en el HTML (si las ves al navegar, revisa manualmente).',
-    'alt descriptivo (o alt="" decorativas), loading="lazy", width/height.');
+        ? `${allImgs.length} img analizadas con alt ${unsized.length ? `; ${unsized.length} sin loading="lazy" o width/height (CLS)` : '(todas con lazy y dimensiones)'}.`
+        : 'No se detectaron imágenes en el HTML (si ves imágenes al navegar, revisa manualmente).',
+    'alt descriptivo en imágenes informativas; alt="" en decorativas; loading="lazy", width y height en todas.');
 
   // ---------- 17. Sourcemaps expuestos ----------
-  const script = extract(html0, /<script[^>]+src=["']([^"']+\.js[^"']*)["']/i);
-  let mapResult = 'Sin scripts detectados en el HTML';
-  let mapOk = true;
-  let mapInfo = 'informational';
-  if (script) {
-    const abs = /^https?:/.test(script) ? script : new URL(script, BASE).href;
-    const map = await get(`${abs}.map`);
-    if (map.status === 200) { mapOk = false; mapResult = `sourcemap expuesto: ${abs}.map (HTTP 200)`.slice(0, 160); mapInfo = 'confirmed'; }
-    else { mapResult = `sourcemap no accesible (HTTP ${map.status || 'n/a'})`; mapInfo = 'confirmed'; }
+  const scripts = [...new Set(okPages.flatMap((p) => p.scripts))].slice(0, 3);
+  let mapResult = 'Sin scripts .js en el HTML';
+  let mapOk = true, mapConf = 'informational';
+  if (scripts.length) {
+    const maps = await Promise.all(scripts.map((s) => get(`${absUrl(s)}.map`, { head: true })));
+    const exposed = maps.filter((m) => m.status === 200);
+    if (exposed.length) {
+      mapOk = false; mapConf = 'confirmed';
+      mapResult = `Sourcemap(s) expuestos: ${maps.map((m, i) => (m.status === 200 ? `${scripts[i].slice(0, 50)}.map → HTTP 200` : '')).filter(Boolean).join(', ')}`;
+    } else {
+      mapConf = 'confirmed';
+      mapResult = `Sourcemaps no accesibles (${scripts.length} script(s) probados, todos bajo control).`;
+    }
   }
   F(17, 'Sourcemaps expuestos',
-    mapOk ? 'ok' : 'fail', mapInfo,
-    mapResult,
-    'build.sourcemap: false en producción y purga los .map ya desplegados.');
+    mapOk ? 'ok' : 'fail', mapConf, mapResult,
+    'build.sourcemap: false en producción (nunca "inline" ni true) y purga caché Vercel para eliminar los .map ya publicados. Ver templates/vite.config.ts.');
 
   // ---------- 18. Errores de consola (manual) ----------
   F(18, 'Errores de consola',
     'warn', 'informational',
-    'No comprobable por HTTP: abre DevTools, recorre todas las rutas y captura los errores (o pide al usuario que lo haga).',
-    'Corrige errores JS, keys de React, assets 404 y dependencias obsoletas.');
+    'No comprobable por HTTP: abre DevTools, recorre todas las rutas y captura los errores rojos (o pide al usuario que lo haga).',
+    'Corrige por severidad: assets 404 y rutas rotas, keys de React, errores de dependencias (npm audit). Verifica recorriendo TODAS las rutas.');
 
   // ---------- 19. Bundle JS ----------
-  let bundleInfo = 'No se pudo evaluar (sin scripts)';
-  let bundleStatus = 'warn';
-  let bundleConf = 'informational';
-  if (script) {
-    const abs = /^https?:/.test(script) ? script : new URL(script, BASE).href;
-    const js = await get(abs);
-    const size = js.sizeCompressed || js.sizeRaw;
-    const kb = Math.round(size / 1024);
-    bundleInfo = `${kb} KB (${script.slice(0, 60)}...)`;
+  let bundleInfo = 'No se pudieron evaluar scripts';
+  let bundleStatus = 'warn', bundleConf = 'informational';
+  if (scripts.length) {
+    const sizes = await Promise.all(scripts.map((s) => get(absUrl(s))));
+    const raw = sizes.reduce((a, s) => a + s.sizeRaw, 0);
+    const comp = sizes.reduce((a, s) => a + (s.sizeCompressed || s.sizeRaw), 0);
+    const kb = Math.round(comp / 1024);
+    const kbRaw = Math.round(raw / 1024);
+    bundleInfo = `${kb} KB (${kbRaw} KB sin comprimir) en ${scripts.length} script(s)${comp < raw ? ' · medido con gzip' : ''}`;
     if (kb > 500) { bundleStatus = 'fail'; bundleConf = 'probable'; }
     else if (kb > 170) { bundleStatus = 'warn'; bundleConf = 'probable'; }
     else { bundleStatus = 'ok'; bundleConf = 'confirmed'; }
-    if (js.sizeCompressed) bundleInfo += ` · ${kb} KB con gzip`;
   }
   F(19, 'Bundle JS gigante',
     bundleStatus, bundleConf, bundleInfo,
-    'React.lazy() + Suspense por ruta, elimina dependencias pesadas. Objetivo: <170 KB gzip inicial.');
+    'React.lazy() + Suspense por ruta, elimina dependencias pesadas (moment→date-fns, lodash→imports concretos), manualChunks para vendors. Objetivo: < 170 KB gzip inicial. Ver templates/vite.config.ts.');
 
   // ---------- 20. Imágenes optimizadas ----------
   const bigImgs = [];
   const srcs = [...new Set(allImgs.map((i) => i.src).filter((s) => /^https?:/.test(s) || s.startsWith('/')))].slice(0, 6);
-  for (const s of srcs) {
-    const h = await head(/^https?:/.test(s) ? s : new URL(s, BASE).href);
-    if (h.size && h.size > 300 * 1024) bigImgs.push(`${s.slice(0, 60)}… (${Math.round(h.size / 1024)} KB)`);
-  }
+  const heads = await Promise.all(srcs.map((s) => get(absUrl(s), { head: true })));
+  heads.forEach((h, i) => {
+    if (h.sizeCompressed && h.sizeCompressed > 300 * 1024) bigImgs.push(`${srcs[i].slice(0, 55)}… (${Math.round(h.sizeCompressed / 1024)} KB, HTTP ${h.status})`);
+  });
   const imgsNOK = bigImgs.length || unsized.length;
   F(20, 'Imágenes optimizadas y lazy loading',
     imgsNOK ? 'warn' : allImgs.length ? 'ok' : 'warn',
     imgsNOK ? 'probable' : 'informational',
-    (bigImgs.length ? `Imágenes pesadas: ${bigImgs.join('; ')}. ` : '') +
-      (unsized.length ? `${unsized.length} img sin loading/lazy o dimensiones declaradas. ` : '') +
-      (allImgs.length ? `${allImgs.length} img analizadas.` : 'Sin imágenes en HTML.'),
-    'WebP/AVIF, lazy loading, srcset/sizes y width/height (target: Lighthouse sin warnings).');
+    (bigImgs.length ? `Imágenes pesadas (>300 KB): ${bigImgs.join('; ')}. ` : '') +
+      (unsized.length ? `${unsized.length} img sin loading="lazy" o dimensiones declaradas. ` : '') +
+      (allImgs.length ? `${allImgs.length} img analizadas en total.` : 'Sin imágenes en HTML.'),
+    'WebP/AVIF en el build (ej. vite-plugin-imagemin), loading="lazy" bajo el fold, srcset/sizes y width/height siempre (target: Lighthouse sin warnings).');
 
   // ---------- Reporte ----------
   const summary = {
@@ -376,24 +432,39 @@ async function main() {
   const date = new Date().toISOString();
   const data = { url: BASE, date, pages: pages.map((p) => p.url), findings, summary };
 
-  if (asJson) {
+  const icon = { ok: '✅', warn: '⚠️', fail: '❌' };
+  const md = [];
+  md.push(`# Auditoría VIBECODE REHAB — ${BASE}`);
+  md.push(`Fecha: ${date.slice(0, 19)} · Páginas analizadas: ${pages.length}`);
+  md.push(`## Resumen: ${summary.ok} ✅ · ${summary.warn} ⚠️ · ${summary.fail} ❌`);
+  if (errs.length) md.push(`\n> ⚠️ No se pudo alcanzar: ${errs.map((p) => p.url).join(', ')}`);
+  md.push('');
+  md.push('| # | Señal | Estado | Confianza | Detalle | Corrección (resumen) |');
+  md.push('|---|-------|--------|-----------|---------|----------------------|');
+  for (const f of findings) {
+    const esc = (s) => String(s).replace(/\|/g, '\\|').replace(/\n/g, ' ');
+    md.push(`| ${f.id} | ${f.name} | ${icon[f.status]} | ${CONF_LABEL[f.confidence] || f.confidence} | ${esc(f.detail).slice(0, 220)} | ${esc(f.fix).slice(0, 140)} |`);
+  }
+  md.push('');
+  md.push('## Siguiente paso');
+  md.push('Pega SKILL.md de este repo (junto con esta URL) en tu agente IA para que aplique las correcciones en orden 1→20, verificando cada una antes de pasar a la siguiente.');
+  const reportMd = md.join('\n') + '\n';
+
+  if (outFile) {
+    const { writeFileSync } = await import('node:fs');
+    if (outFile.toLowerCase().endsWith('.json') || asJson || !outFile.toLowerCase().endsWith('.md')) {
+      writeFileSync(outFile, JSON.stringify(data, null, 2) + '\n');
+    } else {
+      writeFileSync(outFile, reportMd);
+    }
+    console.log(`Reporte guardado en ${outFile}`);
+  } else if (asJson) {
     process.stdout.write(JSON.stringify(data, null, 2) + '\n');
-    return;
+  } else {
+    process.stdout.write(reportMd);
   }
 
-  const icon = { ok: '✅', warn: '⚠️', fail: '❌' };
-  const conf = { confirmed: 'confirmed', probable: 'probable', informational: 'informational' };
-  console.log(`# Auditoría VIBECODE REHAB — ${BASE}`);
-  console.log(`Fecha: ${date.slice(0, 19)} · Páginas analizadas: ${pages.length}`);
-  console.log(`## Resumen: ✅ ${summary.ok} · ⚠️ ${summary.warn} · ❌ ${summary.fail}`);
-  if (errs.length) console.log(`\n> ⚠️ No se pudo alcanzar: ${errs.map((p) => p.url).join(', ')}`);
-  console.log('\n| # | Señal | Estado | Confianza | Detalle |');
-  console.log('|---|-------|--------|-----------|---------|');
-  for (const f of findings) {
-    console.log(`| ${f.id} | ${f.name} | ${icon[f.status]} | ${conf[f.confidence] || f.confidence} | ${String(f.detail).replace(/\|/g, '\\|').slice(0, 200)} |`);
-  }
-  console.log('\n## Siguiente paso');
-  console.log('Pega SKILL.md de este repo (junto con esta URL) en tu agente IA para que aplique las correcciones indicadas en cada fila, en orden 1→20, verificando cada una.');
+  if (strict && summary.fail > 0) process.exit(1);
 }
 
 main().catch((e) => {

@@ -1,14 +1,33 @@
 // Genera public/sitemap.xml desde las rutas reales de la app (señal 14).
-// Uso: node sitemap-gen.mjs
-// Mantén `routes` sincronizado con tu router (o extráelas del router si quieres).
+//
+// Uso:
+//   node sitemap-gen.mjs                                    → usa las rutas de abajo
+//   node sitemap-gen.mjs --base https://midominio.com       → cambia el dominio
+//   node sitemap-gen.mjs /servicios /precios /blog          → rutas extra
+//
+// Mantén `routes` sincronizado con tu router (o extráelas del router automáticamente).
 
-import { writeFileSync } from 'node:fs'
+import { writeFileSync, mkdirSync } from 'node:fs'
+import { dirname } from 'node:path'
 
-const BASE = 'https://dominio.com' // dominio definitivo, sin slash final
-const routes = ['/', '/servicios', '/precios', '/contacto', '/blog', '/blog/post-1']
-const lastmod = new Date().toISOString().slice(0, 10)
+const args = process.argv.slice(2)
+const baseIdx = args.indexOf('--base')
+const BASE = (baseIdx !== -1 ? args[baseIdx + 1] : 'https://dominio.com').replace(/\/+$/, '')
 
-const urls = routes
+const routes = ['/', '/servicios', '/precios', '/contacto', '/blog']
+const extra = args.filter((a) => a.startsWith('/'))
+if (extra.length) routes.push(...extra)
+
+for (const r of routes) {
+  if (!r.startsWith('/')) throw new Error(`La ruta "${r}" debe empezar por "/"`)
+}
+if (routes.some((r) => r !== '/' && r.endsWith('/'))) {
+  throw new Error('Usa rutas sin slash final (y activa trailingSlash: false en Vercel)')
+}
+
+const lastmod = new Date().toISOString().slice(0, 10) // YYYY-MM-DD
+
+const urls = [...new Set(routes)]
   .map((r) => {
     const url = `${BASE}${r === '/' ? '/' : r}`
     return [
@@ -22,6 +41,7 @@ const urls = routes
   })
   .join('\n')
 
+mkdirSync(dirname('public/sitemap.xml'), { recursive: true })
 writeFileSync(
   'public/sitemap.xml',
   '<?xml version="1.0" encoding="UTF-8"?>\n' +

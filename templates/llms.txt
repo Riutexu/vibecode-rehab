@@ -17,3 +17,12 @@ Nuestra propuesta: [diferenciador en 1 frase]. Misión: [misión en 1 frase].
 - Horario de atención: [días, horas] ([zona horaria]).
 - Cobertura/mercado: [países/ciudades].
 - Garantía o política destacada: [1 línea].
+
+## Optional
+
+- ¿Cómo pido presupuesto? [Respuesta clara en 1-2 líneas].
+- ¿Qué plazos manejáis? [Respuesta clara en 1-2 líneas].
+- ¿Hacéis [servicio secundario]? [Respuesta clara en 1-2 líneas].
+
+> Guía de estilo: respuestas directas y factuales, sin lenguaje publicitario.
+> El estándar completo está en https://llmstxt.org/
